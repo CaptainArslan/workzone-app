@@ -2,7 +2,6 @@
 /// Store app name, base URL, and OneSignal app ID here for easy updates.
 class AppConfig {
   AppConfig._();
-
   /// Display name of the application
   static const String appName = 'HayWork';
 

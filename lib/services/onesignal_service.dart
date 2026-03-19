@@ -14,6 +14,7 @@ static Future<void> initialize() async {
     print('[PUSH] OneSignal: already initialized, skip');
     return;
   }
+  
   if (AppConfig.oneSignalAppId.isEmpty) {
     print('[PUSH] OneSignal: app ID empty, skip');
     return;
@@ -23,7 +24,6 @@ static Future<void> initialize() async {
     print('[PUSH] OneSignal: initializing with appId=${AppConfig.oneSignalAppId.substring(0, 8)}...');
     OneSignal.Debug.setLogLevel(OSLogLevel.none);
     OneSignal.initialize(AppConfig.oneSignalAppId);
-
     print('[PUSH] OneSignal: requesting notification permission...');
     await OneSignal.Notifications.requestPermission(true);
     print('[PUSH] OneSignal: permission requested');

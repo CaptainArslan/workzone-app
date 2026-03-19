@@ -105,17 +105,63 @@ class _WebViewScreenState extends State<WebViewScreen> {
   // Build
   // ---------------------------------------------------------------------------
 
+Future<bool> _showExitDialog() async {
+  return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: Colors.white, // Dialog background
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          title: const Text(
+            'Exit App',
+            style: TextStyle(
+              color: Color(0xFF04C18A), // App green color
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          content: const Text(
+            'Are you sure you want to exit?',
+            style: TextStyle(color: Colors.black87),
+          ),
+          actions: [
+            TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.grey, // Cancel button text
+              ),
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(
+                backgroundColor: const Color(0xFF04C18A), // Green button
+                foregroundColor: Colors.white, // White text
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Exit'),
+            ),
+          ],
+        ),
+      ) ??
+      false; // return false if dialog dismissed
+}
+
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, result) async {
-        if (didPop) return;
-        final shouldPop = await _handleBack();
-        if (shouldPop && context.mounted) {
-          Navigator.of(context).pop();
-        }
-      },
+    return WillPopScope(
+    onWillPop: () async {
+      // Check if WebView can go back
+      if (await _controller.canGoBack()) {
+        await _controller.goBack();
+        return false; // prevent app from closing
+      } else {
+        // Show exit confirmation dialog
+        return await _showExitDialog();
+      }
+    },
       child: Scaffold(
         backgroundColor: Colors.white,
         appBar: AppBar(

@@ -54,5 +54,9 @@
     <string>fetch</string>
     <string>remote-notification</string>
 </array>
+
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>Your location is used to show relevant content and features based on where you are.</string>
+
 </dict>
 </plist>
