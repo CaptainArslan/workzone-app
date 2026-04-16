@@ -14,30 +14,25 @@ static Future<void> initialize() async {
     print('[PUSH] OneSignal: already initialized, skip');
     return;
   }
-  
+
   if (AppConfig.oneSignalAppId.isEmpty) {
     print('[PUSH] OneSignal: app ID empty, skip');
     return;
   }
 
   try {
-    print('[PUSH] OneSignal: initializing with appId=${AppConfig.oneSignalAppId.substring(0, 8)}...');
+    print('[PUSH] OneSignal: initializing...');
+    
     OneSignal.Debug.setLogLevel(OSLogLevel.none);
     OneSignal.initialize(AppConfig.oneSignalAppId);
-    print('[PUSH] OneSignal: requesting notification permission...');
-    await OneSignal.Notifications.requestPermission(true);
-    print('[PUSH] OneSignal: permission requested');
 
-    print('[PUSH] OneSignal: optIn push subscription...');
-    await OneSignal.User.pushSubscription.optIn();
-
-    // Wait for subscription to be ready, then persist in local storage
     OneSignal.User.pushSubscription.addObserver((state) {
       final id = state.current.id;
       final token = state.current.token;
-      print('[PUSH] OneSignal: observer fired -> id=${id ?? "null"} token=${token != null ? "***" : "null"}');
+
+      print('[PUSH] observer -> id=${id ?? "null"}');
+
       if (id != null && id.isNotEmpty) {
-        print('[PUSH] OneSignal: subscription ready, saving to local storage');
         PushTokenStorage.savePushSubscription(
           subscriptionId: id,
           token: token,
@@ -50,14 +45,11 @@ static Future<void> initialize() async {
     });
 
     _initialized = true;
-    print('[PUSH] OneSignal: initialization done');
-  } catch (e, stack) {
-    // e.g. "GSM SERVICE NOT AVAILABLE" on some devices; app still runs, push may work when network is ready
-    print('[PUSH] OneSignal: init error (app will continue, push may work later): $e');
-    print('[PUSH] OneSignal: $stack');
+    print('[PUSH] OneSignal: initialized (no permission requested)');
+  } catch (e) {
+    print('[PUSH] init error: $e');
     _initialized = true;
   }
 }
-
 
 }

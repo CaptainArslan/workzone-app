@@ -1,94 +1,109 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:http/http.dart' as http;
 import 'package:onesignal_flutter/onesignal_flutter.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 import '../config/app_config.dart';
 import '../services/push_token_storage.dart';
 
-/// Callback types for WebView lifecycle events.
 typedef OnPageStarted = void Function(String url);
 typedef OnPageFinished = void Function(String url);
-typedef OnWebResourceError = void Function(WebResourceError error);
+typedef OnWebResourceError = void Function(
+    String url, int code, String message);
 
-/// Centralizes WebView controller creation, JS injection, push bridge,
-/// and push token registration. The screen only handles UI state.
 class WebViewService {
   WebViewService._();
 
-  /// Creates a fully configured [WebViewController].
-  ///
-  /// [onPageStarted]  — called when a new page begins loading.
-  /// [onPageFinished] — called when the page DOM is ready (safe to inject JS).
-  /// [onError]        — called only for main-frame load failures.
-  static WebViewController createController({
+  static InAppWebViewController? _activeController;
+
+  static const String _mobileChromeUserAgent =
+      'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+  /// Builds a fully configured [InAppWebView] (same behavior as the previous
+  /// [WebViewController] setup: bridge, injections, logout, push).
+  static Widget buildInAppWebView({
     required OnPageStarted onPageStarted,
     required OnPageFinished onPageFinished,
     required OnWebResourceError onError,
+    void Function(InAppWebViewController controller)? onControllerReady,
   }) {
-    final controller = WebViewController();
-    _activeController = controller;
-
-    controller
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..enableZoom(false)
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 '
-        '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-      )
-      ..addJavaScriptChannel(
-        'FlutterBridge',
-        onMessageReceived: (JavaScriptMessage message) {
-          _handleBridgeMessage(message.message);
-        },
-      )
-      // ..setNavigationDelegate(
-      //   NavigationDelegate(
-      //     onPageStarted: onPageStarted,
-      //     onPageFinished: (url) async {
-      //       onPageFinished(url);
-      //       await _injectViewportMeta(controller);
-      //     },
-      //     onWebResourceError: (error) {
-      //       // Ignore sub-resource failures (images, fonts, scripts).
-      //       // Only surface main-frame errors to the screen.
-      //       if (error.isForMainFrame == false) return;
-      //       onError(error);
-      //     },
-      //   ),
-      // );
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (url) async {
-            // ✅ Detect logout on ANY navigation type (POST, redirect, link)
-            if (isLogoutUrl(url)) {
-              await clearSession(controller);
+    return InAppWebView(
+      initialUrlRequest: URLRequest(url: WebUri(AppConfig.baseUrl)),
+      initialSettings: InAppWebViewSettings(
+        javaScriptEnabled: true,
+        userAgent: _mobileChromeUserAgent,
+        supportZoom: false,
+        builtInZoomControls: false,
+        displayZoomControls: false,
+        mediaPlaybackRequiresUserGesture: false,
+        allowsInlineMediaPlayback: true,
+        useOnDownloadStart: true,
+        transparentBackground: false,
+        underPageBackgroundColor: Colors.white,
+      ),
+      onWebViewCreated: (controller) {
+        _activeController = controller;
+        controller.addJavaScriptHandler(
+          handlerName: 'FlutterBridge',
+          callback: (args) {
+            for (final arg in args) {
+              handleBridgeMessage(arg);
             }
-            onPageStarted(url);
           },
-          onPageFinished: (url) async {
-            onPageFinished(url);
-            await _injectViewportMeta(controller);
-            await _injectLogoutDetector(controller);
-          },
-          onWebResourceError: (error) {
-            if (error.isForMainFrame == false) return;
-            onError(error);
-          },
-        ),
-      );
-
-    return controller;
+        );
+        onControllerReady?.call(controller);
+      },
+      onLoadStart: (controller, url) {
+        final u = url.toString();
+        if (isLogoutUrl(u)) {
+          clearSession();
+        }
+        onPageStarted(u);
+      },
+      onLoadStop: (controller, url) async {
+        final u = url.toString();
+        onPageFinished(u);
+        await _injectFlutterBridgeShim(controller);
+        await _injectViewportMeta(controller);
+        await _injectLogoutDetector(controller);
+        await tryPendingPushRegistration();
+      },
+      onReceivedError: (controller, request, error) {
+        if (request.isForMainFrame == false) return;
+        final u = request.url.toString();
+        onError(u, -1, error.description);
+      },
+      onPermissionRequest: (controller, request) async {
+        return PermissionResponse(
+          resources: request.resources,
+          action: PermissionResponseAction.GRANT,
+        );
+      },
+    );
   }
 
-  // ---------------------------------------------------------------------------
-  // JS injection
-  // ---------------------------------------------------------------------------
+  static Future<void> _injectFlutterBridgeShim(
+      InAppWebViewController controller) async {
+    await controller.evaluateJavascript(source: """
+      (function() {
+        try {
+          if (!window.flutter_inappwebview) return;
+          window.FlutterBridge = window.FlutterBridge || {};
+          window.FlutterBridge.postMessage = function(message) {
+            window.flutter_inappwebview.callHandler('FlutterBridge', message);
+          };
+        } catch (e) {
+          console.log('FlutterBridge shim error: ' + e);
+        }
+      })();
+    """);
+  }
 
-  /// Disables user zoom and enforces a mobile viewport meta tag.
-  /// Must be called from [onPageFinished] — the DOM is ready at that point.
-  static Future<void> _injectViewportMeta(WebViewController controller) async {
-    await controller.runJavaScript("""
+  static Future<void> _injectViewportMeta(
+      InAppWebViewController controller) async {
+    await controller.evaluateJavascript(source: """
       (function() {
         try {
           var meta = document.querySelector('meta[name="viewport"]');
@@ -112,128 +127,101 @@ class WebViewService {
     """);
   }
 
-  // ---------------------------------------------------------------------------
-  // FlutterBridge message handling
-  // ---------------------------------------------------------------------------
-
-  /// Handles JSON or plain-string messages posted by the Laravel blade script.
-  // static void _handleBridgeMessage(String message) {
-  //   print('[PUSH] Bridge: received (length=${message.length})');
+  // static void handleBridgeMessage(dynamic message) {
+  //   final msg = message.toString();
   //   try {
-  //     final data = jsonDecode(message);
+  //     final data = jsonDecode(msg);
   //     if (data is Map && data['type'] == 'push_auth_payload') {
   //       final encryptedUserId = data['pushAuthPayload'] as String?;
   //       if (encryptedUserId != null && encryptedUserId.isNotEmpty) {
-  //         print('[PUSH] Bridge: push_auth_payload received');
+  //         print('[PUSH] push_auth_payload received');
   //         onPushAuthPayload(encryptedUserId);
-  //       } else {
-  //         print('[PUSH] Bridge: push_auth_payload is empty, ignoring');
   //       }
-  //     } else {
-  //       print(
-  //           '[PUSH] Bridge: unknown type=${data is Map ? data['type'] : '?'}');
+  //     } else if (data is Map && data['type'] == 'logout') {
+  //       print('[AUTH] logout received → clearing session');
+  //       clearSession();
   //     }
   //   } catch (_) {
-  //     if (message == 'login_success') {
-  //       print('[PUSH] Bridge: login_success (plain string)');
+  //     if (msg == 'login_success') {
+  //       print('[PUSH] login_success (plain string)');
   //     } else {
-  //       print('[PUSH] Bridge: parse failed or unrecognised message');
+  //       print('[PUSH] unrecognized message');
   //     }
   //   }
   // }
-  static WebViewController? _activeController;
 
-  static void _handleBridgeMessage(String message) {
-    print('[PUSH] Bridge: received (length=${message.length})');
+  static void handleBridgeMessage(dynamic message) {
+    final msg = message.toString();
+
     try {
-      final data = jsonDecode(message);
+      final data = jsonDecode(msg);
+
       if (data is Map && data['type'] == 'push_auth_payload') {
         final encryptedUserId = data['pushAuthPayload'] as String?;
         if (encryptedUserId != null && encryptedUserId.isNotEmpty) {
-          print('[PUSH] Bridge: push_auth_payload received');
+          print('[PUSH] push_auth_payload received');
           onPushAuthPayload(encryptedUserId);
-        } else {
-          print('[PUSH] Bridge: push_auth_payload is empty, ignoring');
         }
+      }
+
+      // ✅ NEW: Ask permission ONLY when website tells
+      else if (data is Map && data['type'] == 'request_push_permission') {
+        print('[PUSH] Requesting notification permission...');
+        _requestPushPermission();
       } else if (data is Map && data['type'] == 'logout') {
-        print('[AUTH] Bridge: logout received → clearing session');
-        if (_activeController != null) {
-          clearSession(_activeController!).then((_) {
-            // ✅ properly chained
-            print('[AUTH] clearSession completed');
-          });
-        }
-      } else {
-        print(
-            '[PUSH] Bridge: unknown type=${data is Map ? data['type'] : '?'}');
+        print('[AUTH] logout received → clearing session');
+        clearSession();
       }
     } catch (_) {
-      if (message == 'login_success') {
-        print('[PUSH] Bridge: login_success (plain string)');
+      if (msg == 'login_success') {
+        print('[PUSH] login_success (plain string)');
       } else {
-        print('[PUSH] Bridge: parse failed or unrecognised message');
+        print('[PUSH] unrecognized message');
       }
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Push token registration
-  // ---------------------------------------------------------------------------
+  static Future<void> _requestPushPermission() async {
+    final granted = await OneSignal.Notifications.requestPermission(true);
 
-  /// Called when the web page sends the encrypted user ID after login.
-  /// Attempts immediate registration; falls back to saving a pending payload
-  /// if the OneSignal subscription ID is not yet available.
+    print('[PUSH] Permission granted: $granted');
+
+    if (granted) {
+      await OneSignal.User.pushSubscription.optIn();
+    }
+  }
+
   static Future<void> onPushAuthPayload(String encryptedUserId) async {
-    print('[PUSH] onPushAuthPayload: start');
-
     String? subscriptionId = await PushTokenStorage.getPushSubscriptionId() ??
         OneSignal.User.pushSubscription.id;
 
     if (subscriptionId == null) {
-      print('[PUSH] onPushAuthPayload: no subscription ID, waiting 2s…');
       await Future.delayed(const Duration(seconds: 2));
       subscriptionId = OneSignal.User.pushSubscription.id ??
           await PushTokenStorage.getPushSubscriptionId();
     }
 
     if (subscriptionId != null && subscriptionId.isNotEmpty) {
-      print('[PUSH] onPushAuthPayload: registering token now');
       final ok = await registerPushToken(encryptedUserId, subscriptionId);
       if (ok) await PushTokenStorage.clearPendingPushAuthPayload();
     } else {
-      print('[PUSH] onPushAuthPayload: saving as pending for later');
       await PushTokenStorage.setPendingPushAuthPayload(encryptedUserId);
     }
   }
 
-  /// Retries push registration if a pending payload exists and the subscription
-  /// ID is now available. Call this from [onPageFinished] and on app start.
   static Future<void> tryPendingPushRegistration() async {
-    print('[PUSH] tryPending: checking…');
     final pending = await PushTokenStorage.getPendingPushAuthPayload();
-    if (pending == null) {
-      print('[PUSH] tryPending: nothing pending');
-      return;
-    }
+    if (pending == null) return;
 
     final subscriptionId = await PushTokenStorage.getPushSubscriptionId() ??
         OneSignal.User.pushSubscription.id;
 
-    if (subscriptionId == null) {
-      print('[PUSH] tryPending: subscription ID still unavailable');
-      return;
-    }
+    if (subscriptionId == null) return;
 
-    print('[PUSH] tryPending: registering pending token');
     final ok = await registerPushToken(pending, subscriptionId);
-    if (ok) {
-      await PushTokenStorage.clearPendingPushAuthPayload();
-      print('[PUSH] tryPending: success, cleared pending');
-    }
+    if (ok) await PushTokenStorage.clearPendingPushAuthPayload();
   }
 
-  /// POSTs the OneSignal subscription ID and encrypted user ID to the backend.
-  /// Returns `true` on HTTP 200/201.
   static Future<bool> registerPushToken(
     String encryptedUserId,
     String subscriptionId,
@@ -244,73 +232,50 @@ class WebViewService {
       'push_auth_payload': encryptedUserId,
       'device_type': Platform.isIOS ? 'ios' : 'android',
     };
-
-    print('[PUSH] API: POST $uri');
-    print(
-      '[PUSH] API: player_id=${subscriptionId.substring(0, subscriptionId.length.clamp(0, 24))}… '
-      'payload=${encryptedUserId.length} chars '
-      'device=${body['device_type']}',
-    );
-
     try {
       final response = await http.post(
         uri,
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(body),
       );
-
-      print('[PUSH] API: status=${response.statusCode}');
-      if (response.body.isNotEmpty) {
-        print(
-          '[PUSH] API: body=${response.body.length > 200 ? '${response.body.substring(0, 200)}…' : response.body}',
-        );
-      }
-
-      if (response.statusCode == 200 || response.statusCode == 201) {
-        print('[PUSH] API: token saved successfully');
-        return true;
-      }
-      print('[PUSH] API: failed ${response.statusCode}');
-      return false;
-    } catch (e, stack) {
-      print('[PUSH] API: exception $e');
-      print('[PUSH] API: $stack');
+      return response.statusCode == 200 || response.statusCode == 201;
+    } catch (_) {
       return false;
     }
   }
 
-  static bool isLogoutUrl(String url) {
-    return url.contains('/seller/logout') || url.contains('/buyer/logout');
-  }
+  static bool isLogoutUrl(String url) =>
+      url.contains('/seller/logout') || url.contains('/buyer/logout');
 
-  static Future<void> clearSession(WebViewController controller) async {
-    print('[AUTH] Clearing cookies, cache, localStorage…');
-    await WebViewCookieManager().clearCookies();
-    await controller.clearCache();
-    await controller.clearLocalStorage();
-    print('[AUTH] Session cleared → reloading to home');
-    await controller
-        .loadRequest(Uri.parse(AppConfig.baseUrl)); // ✅ redirect to homepage
+  static Future<void> clearSession() async {
+    if (_activeController == null) return;
+    final c = _activeController!;
+    await CookieManager.instance().deleteAllCookies();
+    await InAppWebViewController.clearAllCache();
+    await c.evaluateJavascript(source: """
+      try {
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch (e) {}
+    """);
+    await c.loadUrl(
+      urlRequest: URLRequest(url: WebUri(AppConfig.baseUrl)),
+    );
   }
 
   static Future<void> _injectLogoutDetector(
-      WebViewController controller) async {
-    await controller.runJavaScript("""
+      InAppWebViewController controller) async {
+    await controller.evaluateJavascript(source: """
     (function() {
-      // Watch for logout links/buttons being clicked
       document.addEventListener('click', function(e) {
         var el = e.target.closest('a, button, form');
         if (!el) return;
-        
-        // Check anchor tags
         if (el.tagName === 'A') {
           var href = el.getAttribute('href') || '';
           if (href.includes('/logout')) {
             FlutterBridge.postMessage(JSON.stringify({type: 'logout'}));
           }
         }
-        
-        // Check forms
         if (el.tagName === 'FORM') {
           var action = el.getAttribute('action') || '';
           if (action.includes('/logout')) {
@@ -318,8 +283,6 @@ class WebViewService {
           }
         }
       }, true);
-      
-      // Also intercept form submits directly
       document.addEventListener('submit', function(e) {
         var action = e.target.getAttribute('action') || '';
         if (action.includes('/logout')) {
@@ -327,6 +290,6 @@ class WebViewService {
         }
       }, true);
     })();
-  """);
+    """);
   }
 }

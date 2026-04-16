@@ -78,6 +78,5 @@ class PushTokenStorage {
     await prefs.remove(_keyPushSubscriptionId);
     await prefs.remove(_keyPushToken);
     await prefs.remove(_keyPendingPushAuthPayload);
-    print('[PUSH] Storage: clearAll');
   }
 }

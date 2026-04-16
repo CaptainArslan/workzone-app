@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Haywork</string>
+	<string>HayWork</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -28,6 +28,21 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+
+  	<key>NSCameraUsageDescription</key>
+	<string>This app uses the camera to allow users to take and upload profile photos, documents, or images directly within the app.</string>
+
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app allows users to select and upload images such as profile pictures or documents from their photo library.</string>
+    
+    <key>NSMicrophoneUsageDescription</key>
+    <string>This app requires microphone access to record audio.</string>
+
+    <key>UIDeviceFamily</key>
+	<array>
+    <integer>1</integer> <!-- iPhone only -->
+	</array>
+
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

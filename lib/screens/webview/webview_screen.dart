@@ -1,7 +1,10 @@
+import 'dart:async';
+
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:onesignal_flutter/onesignal_flutter.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 import '../../config/app_config.dart';
 import '../../services/webview_service.dart';
 import '../../widgets/error_widget.dart' as app_widgets;
@@ -15,16 +18,25 @@ class WebViewScreen extends StatefulWidget {
 }
 
 class _WebViewScreenState extends State<WebViewScreen> {
-  late final WebViewController _controller;
+  InAppWebViewController? _controller;
 
   bool _isLoading = true;
   bool _hasError = false;
+  bool _hasInternet = true;
+  late StreamSubscription<List<ConnectivityResult>> _connectivitySub;
   bool _permissionRequested = false;
   String _errorMessage = '';
 
   @override
   void initState() {
     super.initState();
+    _connectivitySub = Connectivity()
+        .onConnectivityChanged
+        .listen((List<ConnectivityResult> results) {
+      final connected = results.any((r) => r != ConnectivityResult.none);
+      setState(() => _hasInternet = connected);
+      if (connected) _controller?.reload();
+    });
 
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
@@ -34,20 +46,14 @@ class _WebViewScreenState extends State<WebViewScreen> {
       ),
     );
 
-    _controller = WebViewService.createController(
-      onPageStarted: _onPageStarted,
-      onPageFinished: _onPageFinished,
-      onError: _onWebResourceError,
-    )
-      ..setBackgroundColor(Colors.white)
-      ..loadRequest(Uri.parse(AppConfig.baseUrl));
-
     WebViewService.tryPendingPushRegistration();
   }
 
-  // ---------------------------------------------------------------------------
-  // WebView lifecycle callbacks (wired up via WebViewService)
-  // ---------------------------------------------------------------------------
+  @override
+  void dispose() {
+    _connectivitySub.cancel(); // ← ADD
+    super.dispose();
+  }
 
   void _onPageStarted(String url) {
     if (!mounted) return;
@@ -61,107 +67,87 @@ class _WebViewScreenState extends State<WebViewScreen> {
     if (!mounted) return;
     setState(() => _isLoading = false);
 
-    // Retry any pending push registration now that the page is loaded.
     WebViewService.tryPendingPushRegistration();
 
-    // Request push notification permission once after the first page load.
     if (!_permissionRequested) {
       _permissionRequested = true;
       OneSignal.Notifications.requestPermission(true);
     }
   }
 
-  void _onWebResourceError(WebResourceError error) {
+  void _onWebResourceError(String url, int code, String message) {
     if (!mounted) return;
     setState(() {
       _hasError = true;
-      _errorMessage = error.description.isNotEmpty
-          ? error.description
-          : 'Failed to load page.';
+      _hasInternet = false;
+      _errorMessage = message.isNotEmpty ? message : 'Failed to load page.';
     });
   }
-
-  // ---------------------------------------------------------------------------
-  // Navigation helpers
-  // ---------------------------------------------------------------------------
 
   Future<void> _reload() async {
     setState(() {
       _isLoading = true;
       _hasError = false;
     });
-    await _controller.loadRequest(Uri.parse(AppConfig.baseUrl));
+    await _controller?.loadUrl(
+      urlRequest: URLRequest(url: WebUri(AppConfig.baseUrl)),
+    );
   }
 
-  Future<bool> _handleBack() async {
-    if (await _controller.canGoBack()) {
-      await _controller.goBack();
-      return false;
-    }
-    return true;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Build
-  // ---------------------------------------------------------------------------
-
-Future<bool> _showExitDialog() async {
-  return await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          backgroundColor: Colors.white, // Dialog background
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          title: const Text(
-            'Exit App',
-            style: TextStyle(
-              color: Color(0xFF04C18A), // App green color
-              fontWeight: FontWeight.bold,
+  Future<bool> _showExitDialog() async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
             ),
-          ),
-          content: const Text(
-            'Are you sure you want to exit?',
-            style: TextStyle(color: Colors.black87),
-          ),
-          actions: [
-            TextButton(
-              style: TextButton.styleFrom(
-                foregroundColor: Colors.grey, // Cancel button text
+            title: const Text(
+              'Exit App',
+              style: TextStyle(
+                color: Color(0xFF04C18A),
+                fontWeight: FontWeight.bold,
               ),
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Cancel'),
             ),
-            TextButton(
-              style: TextButton.styleFrom(
-                backgroundColor: const Color(0xFF04C18A), // Green button
-                foregroundColor: Colors.white, // White text
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
+            content: const Text(
+              'Are you sure you want to exit?',
+              style: TextStyle(color: Colors.black87),
+            ),
+            actions: [
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.grey,
                 ),
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
               ),
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Exit'),
-            ),
-          ],
-        ),
-      ) ??
-      false; // return false if dialog dismissed
-}
+              TextButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: const Color(0xFF04C18A),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Exit'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
 
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
-    onWillPop: () async {
-      // Check if WebView can go back
-      if (await _controller.canGoBack()) {
-        await _controller.goBack();
-        return false; // prevent app from closing
-      } else {
-        // Show exit confirmation dialog
+      onWillPop: () async {
+        if (_controller != null && await _controller!.canGoBack()) {
+          await _controller!.goBack();
+          return false;
+        }
         return await _showExitDialog();
-      }
-    },
+      },
       child: Scaffold(
         backgroundColor: Colors.white,
         appBar: AppBar(
@@ -175,23 +161,75 @@ Future<bool> _showExitDialog() async {
           ),
         ),
         body: _hasError
-            ? app_widgets.AppErrorWidget(
-                message: _errorMessage,
-                onRetry: () async {
-                  if (!mounted) return;
-                  await _reload();
-                },
-              )
+            ? (!_hasInternet
+                ? _NoInternetWidget(onRetry: _reload)
+                : app_widgets.AppErrorWidget(
+                    message: _errorMessage,
+                    onRetry: () async {
+                      if (!mounted) return;
+                      await _reload();
+                    },
+                  ))
             : Stack(
                 children: [
                   RefreshIndicator(
                     onRefresh: _reload,
-                    child: WebViewWidget(controller: _controller),
+                    child: ColoredBox(
+                      color: Colors.white,
+                      child: WebViewService.buildInAppWebView(
+                        onPageStarted: _onPageStarted,
+                        onPageFinished: _onPageFinished,
+                        onError: _onWebResourceError,
+                        onControllerReady: (c) {
+                          _controller = c;
+                        },
+                      ),
+                    ),
                   ),
-                  if (_isLoading)
-                    const LoadingWidget(),
+                  if (_isLoading) const LoadingWidget(),
                 ],
               ),
+      ),
+    );
+  }
+}
+
+class _NoInternetWidget extends StatelessWidget {
+  final VoidCallback onRetry;
+  const _NoInternetWidget({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.wifi_off_rounded, size: 72, color: Colors.grey),
+            const SizedBox(height: 24),
+            const Text(
+              'No Internet Connection',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Check your connection and try again.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 32),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF04C18A),
+                foregroundColor: Colors.white,
+              ),
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Retry'),
+            ),
+          ],
+        ),
       ),
     );
   }
